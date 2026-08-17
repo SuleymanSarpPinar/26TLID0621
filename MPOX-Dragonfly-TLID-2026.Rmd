@@ -1,0 +1,551 @@
+---
+title: "MPOX-Dragonfly-TLID-2026 -- Final Code"
+output:
+  html_document:
+    toc: true
+    toc_depth: '2'
+    df_print: paged
+  html_notebook:
+    toc: true
+    toc_depth: 2
+---
+
+# Setup
+
+```{r setup}
+# readxl reads the source data, binom gives Wilson confidence intervals,
+# and openxlsx writes the final results workbook.
+library(readxl)
+library(binom)
+library(openxlsx)
+
+# Read the only worksheet used in the analysis.
+data_file <- "mpox_dragonfly_tlid_Supplementary_data_Aug2026.xlsx"
+data <- as.data.frame(read_excel(data_file, sheet = "Manuscript data"))
+```
+
+# Small repeated tasks
+
+```{r}
+yes_no <- function(x) {
+  factor(x, levels = c("No", "Yes", "Unknown"))
+}
+
+# Format counts and percentages for the manuscript tables.
+n_pct <- function(n, total) {
+  sprintf("%d/%d (%.1f%%)", n, total, 100 * n / total)
+}
+
+# Format a median and interquartile range.
+median_iqr <- function(x) {
+  q <- quantile(x, c(0.25, 0.50, 0.75), na.rm = TRUE, names = FALSE)
+  sprintf("%.1f (%.1f-%.1f)", q[2], q[1], q[3])
+}
+
+# Use the same number formatting as the manuscript workbook.
+pct <- function(x) sprintf("%.1f%%", 100 * x)
+p_value <- function(x) ifelse(x < 0.0001, "<0.0001", sprintf("%.4f", x))
+or_ci <- function(or, low, high) sprintf("%.2f (%.2f to %.2f)", or, low, high)
+difference_ci <- function(x, low, high) {
+  sprintf("%.1f pp (%.1f to %.1f)", 100 * x, 100 * low, 100 * high)
+}
+```
+
+# Diagnostic performance
+
+```{r diagnostic-data}
+# A target is qPCR positive when its Ct value is greater than 1.
+ct_opxv <- as.numeric(data$`CT OPXV`)
+ct_mpxv <- as.numeric(data$`CT MPXV`)
+opxv_qpcr <- factor(ifelse(!is.na(ct_opxv) & ct_opxv > 1, "Positive", "Negative"),
+                    levels = c("Negative", "Positive"))
+mpxv_qpcr <- factor(ifelse(!is.na(ct_mpxv) & ct_mpxv > 1, "Positive", "Negative"),
+                    levels = c("Negative", "Positive"))
+
+# Translate the OPXV colour result into a positive/negative call.
+opxv_dragonfly <- ifelse(
+  data$`OPXV Colour` == "Positive (Yellow Colour)", "Positive",
+  ifelse(data$`OPXV Colour` == "Negative (Pink Colour)", "Negative", NA)
+)
+opxv_dragonfly <- factor(opxv_dragonfly, levels = c("Negative", "Positive"))
+
+# Translate the MPXV colour result. Invalid is negative here, as in the manuscript.
+mpxv_dragonfly <- ifelse(
+  data$`MPXV Colour` == "Positive (Yellow Colour)", "Positive",
+  ifelse(data$`MPXV Colour` %in%
+           c("Negative (Pink Colour)", "None of the above (Invalid)"),
+         "Negative", NA)
+)
+mpxv_dragonfly <- factor(mpxv_dragonfly, levels = c("Negative", "Positive"))
+
+# Rows are Dragonfly results and columns are qPCR results.
+opxv_2x2 <- table(Dragonfly = opxv_dragonfly, qPCR = opxv_qpcr)
+mpxv_2x2 <- table(Dragonfly = mpxv_dragonfly, qPCR = mpxv_qpcr)
+```
+
+```{r diagnostic-metrics}
+# Calculate the five diagnostic measures with Wilson 95% confidence intervals.
+diagnostic_metrics <- function(tab) {
+  TP <- unname(tab["Positive", "Positive"])
+  FP <- unname(tab["Positive", "Negative"])
+  FN <- unname(tab["Negative", "Positive"])
+  TN <- unname(tab["Negative", "Negative"])
+
+  metric <- c("Sensitivity", "Specificity", "PPV", "NPV", "Accuracy")
+  numerator <- c(TP, TN, TP, TN, TP + TN)
+  denominator <- c(TP + FN, TN + FP, TP + FP, TN + FN, TP + FP + FN + TN)
+  value <- character(length(metric))
+
+  for (i in seq_along(metric)) {
+    ci <- binom.confint(numerator[i], denominator[i], method = "wilson")
+    value[i] <- sprintf("%.1f%% (%.1f-%.1f%%)",
+                        100 * ci$mean, 100 * ci$lower, 100 * ci$upper)
+  }
+
+  data.frame(Metric = metric, Value = value, stringsAsFactors = FALSE)
+}
+
+# Calculate OPXV and MPXV separately.
+metrics_opxv <- diagnostic_metrics(opxv_2x2)
+metrics_mpxv <- diagnostic_metrics(mpxv_2x2)
+
+# Combine them for the printed and exported table.
+diagnostic_summary <- rbind(
+  data.frame(Target = "OPXV", metrics_opxv),
+  data.frame(Target = "MPXV", metrics_mpxv)
+)
+
+diagnostic_summary
+```
+
+## Figure III
+
+```{r diagnostic-figure, fig.width=12, fig.height=9}
+# Draw one labelled 2 by 2 table.
+draw_2x2 <- function(tab, title) {
+  plot.new()
+  plot.window(xlim = c(0.5, 2.5), ylim = c(0.5, 2.5))
+
+  for (row in 1:2) {
+    for (column in 1:2) {
+      y <- 3 - row
+      rect(column - 0.5, y - 0.5, column + 0.5, y + 0.5,
+           col = "grey90", border = "grey50")
+
+      cell <- if (row == 2 && column == 2) "TP" else
+        if (row == 2 && column == 1) "FP" else
+          if (row == 1 && column == 2) "FN" else "TN"
+
+      text(column, y, paste0(cell, " = ", tab[row, column]), cex = 1.1)
+    }
+  }
+
+  axis(3, at = 1:2, labels = c("qPCR NEG", "qPCR POS"), tick = FALSE)
+  axis(2, at = 2:1, labels = c("DF NEG", "DF POS"),
+       tick = FALSE, las = 1)
+  title(main = title)
+}
+
+# Draw one Ct histogram and print its median, IQR and range.
+draw_ct <- function(x, title) {
+  x <- x[!is.na(x)]
+  q <- quantile(x, c(0.25, 0.50, 0.75), names = FALSE)
+  hist(x, breaks = 10, col = "grey85", border = "white",
+       main = title, xlab = "Ct value")
+  legend("topright",
+         legend = c(sprintf("Median (IQR): %.1f (%.1f-%.1f)", q[2], q[1], q[3]),
+                    sprintf("Range: %.1f-%.1f", min(x), max(x))),
+         bty = "n", cex = 0.8)
+}
+
+# Print the five diagnostic estimates in one plain panel.
+draw_metrics <- function(x, title) {
+  plot.new()
+  title(main = title)
+  text(0.05, seq(0.82, 0.18, length.out = nrow(x)),
+       paste0(x$Metric, ":  ", x$Value), adj = 0, cex = 0.95)
+}
+
+# Draw all six panels.
+draw_diagnostic_figure <- function() {
+  old <- par(mfrow = c(3, 2), mar = c(4, 5, 3, 1))
+  on.exit(par(old))
+  draw_2x2(opxv_2x2, "A. OPXV detection")
+  draw_2x2(mpxv_2x2, "B. MPXV detection")
+  draw_ct(ct_opxv, "C. OPXV Ct distribution")
+  draw_ct(ct_mpxv, "D. MPXV Ct distribution")
+  draw_metrics(metrics_opxv, "E. OPXV performance")
+  draw_metrics(metrics_mpxv, "F. MPXV performance")
+}
+
+# Show the figure in the notebook.
+draw_diagnostic_figure()
+```
+
+# Analysis data
+
+```{r}
+# Keep only the fields used in the remaining analysis.
+analysis <- data.frame(
+  case_id = as.character(data$`Sample ID`),
+  age = as.numeric(data$Age),
+  sex = as.character(data$Sex),
+  pcr_result = factor(data$`PCR Result`, levels = c("Negative", "Positive")),
+  dragonfly_result = factor(data$`Dragonfly Result`, levels = c("Negative", "Positive")),
+  ct_opxv = ct_opxv,
+  ct_mpxv = ct_mpxv,
+  stringsAsFactors = FALSE
+)
+
+# Target-level Dragonfly calls used in the discordant-case figure.
+analysis$dragonfly_opxv_result <- ifelse(
+  data$`OPXV Colour` == "Positive (Yellow Colour)", "Positive",
+  ifelse(data$`OPXV Colour` == "Negative (Pink Colour)", "Negative", "Unknown")
+)
+analysis$dragonfly_mpxv_result <- ifelse(
+  data$`MPXV Colour` == "Positive (Yellow Colour)", "Positive",
+  ifelse(data$`MPXV Colour` == "Negative (Pink Colour)", "Negative", "Unknown")
+)
+
+# Clinical fields used in the comparisons and discordant-case figure.
+analysis$close_contact_mpox_case <- yes_no(data$`Close contact with a suspected or probable case of mpox`)
+analysis$sexual_partner_last_21d <- yes_no(data$`Sexual partner in last 21 days`)
+analysis$fever <- yes_no(data$`Symptom (Fever)`)
+analysis$swollen_lymph_nodes_symptom <- yes_no(data$`Symptom (swollen lymph nodes)`)
+analysis$lesion_genital <- yes_no(data$`Lesions (genital)`)
+analysis$mucosal_involvement <- yes_no(data$`Mucosal involvement`)
+analysis$rash_maculopapular <- yes_no(data$`Rash (maculopapular)`)
+analysis$myalgia_symptom <- yes_no(data$`Symptom (myalgia)`)
+analysis$fatigue_symptom <- yes_no(data$`Symptom (fatigue)`)
+
+# For the heatmap, a present Ct is positive. A missing Ct is negative only
+# when the overall PCR result is negative; otherwise it is unknown.
+analysis$qpcr_opxv_result <- ifelse(
+  !is.na(analysis$ct_opxv), "Positive",
+  ifelse(analysis$pcr_result == "Negative", "Negative", "Unknown")
+)
+analysis$qpcr_mpxv_result <- ifelse(
+  !is.na(analysis$ct_mpxv), "Positive",
+  ifelse(analysis$pcr_result == "Negative", "Negative", "Unknown")
+)
+
+# Invalid MPXV colour is negative for the concordance calculation.
+mpxv_positive <- ifelse(
+  data$`MPXV Colour` == "Positive (Yellow Colour)", "Yes",
+  ifelse(data$`MPXV Colour` %in%
+           c("Negative (Pink Colour)", "None of the above (Invalid)"),
+         "No", NA)
+)
+
+# Put each case into one of the four manuscript concordance groups.
+analysis$concordance_group <- NA_character_
+analysis$concordance_group[analysis$pcr_result == "Negative" & mpxv_positive == "No"] <- "Concordant negative"
+analysis$concordance_group[analysis$pcr_result == "Positive" & mpxv_positive == "Yes"] <- "Concordant positive"
+analysis$concordance_group[analysis$pcr_result == "Negative" & mpxv_positive == "Yes"] <- "Discordant Dragonfly+ / PCR-"
+analysis$concordance_group[analysis$pcr_result == "Positive" & mpxv_positive == "No"] <- "Discordant Dragonfly- / PCR+"
+
+# Inferential comparisons use only concordant negatives and concordant positives.
+case_control <- analysis[analysis$concordance_group %in%
+                           c("Concordant negative", "Concordant positive"), ]
+case_control$pcr_result_label <- factor(
+  ifelse(case_control$concordance_group == "Concordant positive", "Positive", "Negative"),
+  levels = c("Negative", "Positive")
+)
+
+# Keep discordant cases for their descriptive figure and export.
+discordant <- analysis[grepl("Discordant", analysis$concordance_group), ]
+```
+
+# Table I
+
+```{r table-1}
+# These are the profession groups printed in the manuscript table.
+profession_levels <- c(
+  "Student", "Builder", "Driver", "Farmer", "Fisherman", "Food vendor",
+  "Health worker", "Housewife", "Market vendor", "Mechanic",
+  "Merchandise vendor", "Sex worker"
+)
+
+# Profession and exposure labels have already been standardised in the Excel file.
+profession <- as.character(data$Profession)
+exposure <- as.character(data$`Reported exposure`)
+
+# Assemble the few fields needed for Table 1.
+sex <- as.character(data$Sex)
+sex[is.na(sex) | !sex %in% c("Female", "Male")] <- "Unknown"
+
+table1_data <- data.frame(
+  pcr_result = as.character(data$`PCR Result`),
+  sex = sex,
+  age = as.numeric(data$Age),
+  profession = profession,
+  exposure = exposure,
+  international = yes_no(data$`International in the last 21 days?`),
+  district = yes_no(data$`Province/district travel in the last 21 days?`),
+  stringsAsFactors = FALSE
+)
+
+# Use the manuscript age groups.
+table1_data$age_group <- ifelse(
+  is.na(table1_data$age), "Missing age",
+  ifelse(table1_data$age <= 4, "Infant (<=4 years)",
+         ifelse(table1_data$age <= 14, "Child (5 to <=14 years)",
+                "Adult (>=15 years)"))
+)
+
+# Make the two Table 1 columns.
+all_cases <- table1_data
+positive_cases <- table1_data[table1_data$pcr_result == "Positive", ]
+all_heading <- paste0("All suspected cases (n=", nrow(all_cases), ")")
+positive_heading <- paste0("MPXV PCR positive (n=", nrow(positive_cases), ")")
+
+# Make one row, then one counted row, using the full column denominators.
+make_row <- function(label, all_value = "", positive_value = "") {
+  answer <- data.frame(label, all_value, positive_value,
+                       stringsAsFactors = FALSE, check.names = FALSE)
+  names(answer) <- c("Characteristic", all_heading, positive_heading)
+  answer
+}
+
+count_row <- function(variable, level, label = level) {
+  all_n <- sum(as.character(all_cases[[variable]]) == level, na.rm = TRUE)
+  positive_n <- sum(as.character(positive_cases[[variable]]) == level, na.rm = TRUE)
+  make_row(label,
+           n_pct(all_n, nrow(all_cases)),
+           n_pct(positive_n, nrow(positive_cases)))
+}
+
+# Exposure rows in the manuscript table.
+exposure_levels <- c(
+  "Household contact", "Sexual exposure", "Contact with symptomatic person at event",
+  "Contact with clothes or other objects from a symptomatic person",
+  "No reported exposure", "Unknown exposure", "At workplace", "Guest house"
+)
+
+# Build Table 1 in its printed order.
+table1 <- rbind(
+  make_row("Sex"),
+  count_row("sex", "Female"),
+  count_row("sex", "Male"),
+  count_row("sex", "Unknown", "Missing/unknown"),
+
+  make_row("Age"),
+  make_row("Known age, n (%)",
+           n_pct(sum(!is.na(all_cases$age)), nrow(all_cases)),
+           n_pct(sum(!is.na(positive_cases$age)), nrow(positive_cases))),
+  make_row("Median (IQR), years", median_iqr(all_cases$age), median_iqr(positive_cases$age)),
+  do.call(rbind, lapply(c("Infant (<=4 years)", "Child (5 to <=14 years)",
+                         "Adult (>=15 years)", "Missing age"),
+                        function(x) count_row("age_group", x))),
+
+  make_row("Profession*"),
+  do.call(rbind, lapply(profession_levels, function(x) count_row("profession", x))),
+  make_row("Other/unknown",
+           n_pct(sum(all_cases$profession == "Other"), nrow(all_cases)),
+           n_pct(sum(positive_cases$profession == "Other"), nrow(positive_cases))),
+
+  make_row("Reported exposure**"),
+  do.call(rbind, lapply(exposure_levels, function(x) count_row("exposure", x))),
+
+  make_row("Travel in previous 21 days"),
+  count_row("international", "Yes", "International"),
+  count_row("district", "Yes", "Another district or province"),
+  make_row(
+    "Missing/unknown travel response",
+    n_pct(sum(all_cases$international == "Unknown" |
+                all_cases$district == "Unknown"), nrow(all_cases)),
+    n_pct(sum(positive_cases$international == "Unknown" |
+                positive_cases$district == "Unknown"), nrow(positive_cases))
+  )
+)
+
+table1
+```
+
+# Supplementary Table I
+
+```{r}
+# Variables included in the analysis.
+binary_labels <- c(
+  close_contact_mpox_case = "Close contact with suspected/probable mpox case",
+  sexual_partner_last_21d = "Sexual exposure in prior 21 days",
+  fever = "Fever",
+  swollen_lymph_nodes_symptom = "Swollen lymph nodes",
+  lesion_genital = "Genital lesions",
+  mucosal_involvement = "Mucosal involvement",
+  rash_maculopapular = "Maculopapular rash",
+  myalgia_symptom = "Myalgia",
+  fatigue_symptom = "Fatigue"
+)
+
+group <- case_control$pcr_result_label
+
+analyse_variable <- function(variable) {
+  value <- as.character(case_control[[variable]])
+  keep <- !is.na(group) & value %in% c("No", "Yes")
+
+  tab <- table(
+    factor(group[keep], levels = c("Negative", "Positive")),
+    factor(value[keep], levels = c("No", "Yes"))
+  )
+
+  yes <- tab[, "Yes"]
+  total <- rowSums(tab)
+  prevalence <- yes / total
+  fisher_result <- fisher.test(tab, conf.int = TRUE)
+  proportion_result <- suppressWarnings(
+    prop.test(yes[c("Positive", "Negative")],
+              total[c("Positive", "Negative")], correct = FALSE)
+  )
+
+  data.frame(
+    variable = variable,
+    label = unname(binary_labels[variable]),
+    n_negative = unname(total["Negative"]),
+    negative_yes = unname(yes["Negative"]),
+    prevalence_negative = unname(prevalence["Negative"]),
+    n_positive = unname(total["Positive"]),
+    positive_yes = unname(yes["Positive"]),
+    prevalence_positive = unname(prevalence["Positive"]),
+    difference = unname(prevalence["Positive"] - prevalence["Negative"]),
+    difference_low = unname(proportion_result$conf.int[1]),
+    difference_high = unname(proportion_result$conf.int[2]),
+    p_difference = proportion_result$p.value,
+    odds_ratio = unname(fisher_result$estimate),
+    odds_ratio_low = unname(fisher_result$conf.int[1]),
+    odds_ratio_high = unname(fisher_result$conf.int[2]),
+    p_odds_ratio = fisher_result$p.value
+  )
+}
+
+binary_results <- do.call(
+  rbind, lapply(names(binary_labels), analyse_variable)
+)
+
+binary_results$p_difference_fdr <- p.adjust(
+  binary_results$p_difference, method = "BH"
+)
+binary_results$p_odds_ratio_fdr <- p.adjust(
+  binary_results$p_odds_ratio, method = "BH"
+)
+
+binary_results_print <- data.frame(
+  Variable = binary_results$label,
+  `PCR-negative / concordant negative` = sprintf(
+    "%d/%d (%.1f%%)", binary_results$negative_yes,
+    binary_results$n_negative, 100 * binary_results$prevalence_negative
+  ),
+  `PCR-positive / concordant positive` = sprintf(
+    "%d/%d (%.1f%%)", binary_results$positive_yes,
+    binary_results$n_positive, 100 * binary_results$prevalence_positive
+  ),
+  `Prevalence difference (positive minus negative)` = difference_ci(
+    binary_results$difference, binary_results$difference_low,
+    binary_results$difference_high
+  ),
+  `FDR-adjusted P value for prevalence difference` = p_value(
+    binary_results$p_difference_fdr
+  ),
+  `Odds ratio (95% CI)` = or_ci(
+    binary_results$odds_ratio, binary_results$odds_ratio_low,
+    binary_results$odds_ratio_high
+  ),
+  `FDR-adjusted P value for odds ratio` = p_value(
+    binary_results$p_odds_ratio_fdr
+  ),
+  check.names = FALSE
+)
+
+binary_results_print
+```
+
+
+# TABLE IV
+
+```{r, fig.width=12, fig.height=12}
+# These are the columns shown in the discordant-case figure.
+feature_key <- data.frame(
+  feature = c(
+    "dragonfly_opxv_result", "dragonfly_mpxv_result",
+    "qpcr_opxv_result", "qpcr_mpxv_result",
+    "close_contact_mpox_case", "sexual_partner_last_21d", "fever",
+    "lesion_genital", "rash_maculopapular", "mucosal_involvement",
+    "swollen_lymph_nodes_symptom"
+  ),
+  label = c(
+    "DF OPXV", "DF MPXV", "qPCR OPXV", "qPCR MPXV", "MPXV contact",
+    "Sexual exposure", "Fever", "Genital lesion", "Maculopapular rash",
+    "Mucosal involvement", "Lymphadenopathy"
+  ),
+  domain = c(rep("Diagnostic", 4), rep("Clinical", 7)),
+  stringsAsFactors = FALSE
+)
+
+# Draw one basic labelled heatmap panel.
+draw_discordant_panel <- function(x, title) {
+  x <- x[order(x$age, x$case_id), ]
+  n_cases <- nrow(x)
+  n_features <- nrow(feature_key)
+
+  plot(NA, xlim = c(0.5, n_features + 0.5), ylim = c(0.5, n_cases + 0.5),
+       axes = FALSE, xlab = "", ylab = "", main = title)
+
+  for (i in seq_len(n_cases)) {
+    y <- n_cases - i + 1
+
+    for (j in seq_len(n_features)) {
+      value <- as.character(x[[feature_key$feature[j]]][i])
+      if (is.na(value)) value <- "Unknown"
+
+      # Diagnostic and clinical tiles use separate simple colour pairs.
+      colour <- "grey85"
+      if (feature_key$domain[j] == "Diagnostic" && value == "Positive") colour <- "dimgray"
+      if (feature_key$domain[j] == "Diagnostic" && value == "Negative") colour <- "gainsboro"
+      if (feature_key$domain[j] == "Clinical" && value == "Yes") colour <- "grey"
+      if (feature_key$domain[j] == "Clinical" && value == "No") colour <- "whitesmoke"
+
+      # Short label printed inside the tile.
+      label <- ifelse(value == "Positive", "Pos",
+                      ifelse(value == "Negative", "Neg",
+                             ifelse(value == "Unknown", "Unk", value)))
+
+      if (feature_key$feature[j] == "qpcr_opxv_result" && value == "Positive") {
+        label <- paste0("Pos\n", sprintf("%.1f", x$ct_opxv[i]))
+      }
+      if (feature_key$feature[j] == "qpcr_mpxv_result" && value == "Positive") {
+        label <- paste0("Pos\n", sprintf("%.1f", x$ct_mpxv[i]))
+      }
+
+      rect(j - 0.5, y - 0.5, j + 0.5, y + 0.5,
+           col = colour, border = "white")
+      text(j, y, label, cex = 0.65)
+    }
+  }
+
+  # Label every feature and every case.
+  axis(1, at = seq_len(n_features), labels = feature_key$label,
+       las = 2, tick = FALSE, cex.axis = 0.75)
+  case_label <- paste0(x$case_id, "  (age ", x$age, ")")
+  axis(2, at = n_cases:1, labels = case_label,
+       las = 1, tick = FALSE, cex.axis = 0.72)
+  box()
+}
+
+# Draw the two discordant groups one above the other.
+draw_discordant_figure <- function() {
+  old <- par(mfrow = c(2, 1), mar = c(8, 9, 3, 1))
+  on.exit(par(old))
+  draw_discordant_panel(
+    discordant[discordant$concordance_group == "Discordant Dragonfly+ / PCR-", ],
+    "A. Dragonfly-positive / PCR-negative"
+  )
+  draw_discordant_panel(
+    discordant[discordant$concordance_group == "Discordant Dragonfly- / PCR+", ],
+    "B. Dragonfly-negative / PCR-positive"
+  )
+}
+
+# Show the figure in the notebook.
+draw_discordant_figure()
+```
+
